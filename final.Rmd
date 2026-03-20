@@ -1,0 +1,835 @@
+---
+title: "Warming Restructures Age-Dependent Disease Dynamics in a Multi-Pathogen System"
+output: html_document
+date: "2026-01-27"
+---
+```{r}
+library(ggplot2)
+library(cowplot)
+library(car)
+library(ggpubr)
+library(RColorBrewer)
+library(dplyr)
+library(tidyverse)
+library(lme4)
+library(lmerTest)
+library(emmeans)
+library(dplyr)
+library(tidyr)
+library(lme4)
+library(lmerTest)
+library(nlme)
+library(emmeans)
+library(ggplot2)
+
+```
+
+
+```{r}
+df_GRmetadata<-read.csv("C:\\Users\\set2be\\OneDrive - University of North Carolina at Chapel Hill\\Chapter 1\\Formatted manuscript materials\\metadata.csv") 
+
+
+df_GRmetadata$inoc<-factor(df_GRmetadata$inoc,levels=c("m","c","r","rc"))
+
+names(df_GRmetadata)[2] <- 'temp'
+names(df_GRmetadata)[1]<-'replicate'
+
+df_GRmetadata$replicate<-factor(df_GRmetadata$replicate,levels=c("1","2","3","4","5","6"))
+
+#df_GRmetadata
+
+# Create treatment_block 
+df_GRmetadata <- df_GRmetadata %>%
+  mutate(treatment_block = interaction(inoc, age_gp, temp, sep = "_"))
+
+```
+
+###############################################
+Survival 
+###############################################
+```{r}
+data <- df_GRmetadata %>%
+  group_by( replicate,inoc, age_gp, temp,treatment_block) %>%
+  summarise(
+    surviving = n(),
+  ) %>%
+  ungroup()
+
+print(data)
+```
+##modeling 
+```{r}
+
+data$n_inoculated<- ifelse(data$replicate == 6, 35, 25)
+data$died <- data$n_inoculated - data$surviving
+
+
+survived <- glmer(
+  cbind(surviving, died) ~ temp * age_gp * inoc + (1 | replicate/treatment_block),
+  data = data,
+  family = binomial
+)
+
+#summary(survived)
+Anova(survived, type = 2)
+
+
+emm <- emmeans(survived, ~temp * inoc, type = "response")
+emm
+
+```
+
+
+###############################################
+Disease Prevalence 
+###############################################
+
+######################Colletotrichum
+```{r}
+disease.long<-df_GRmetadata%>%
+pivot_longer(cols=c(CollD5,CollD7,CollD10,CollD12,CollD15,CollD20),
+              names_to="date",
+                values_to="collprevalence")
+
+disease.coll<-disease.long%>%
+  mutate(date=factor(date,levels=c("CollD5","CollD7","CollD10","CollD12","CollD15","CollD20")))
+
+prevcoll<-disease.coll%>%
+  dplyr::group_by(replicate,date,inoc,age_gp,temp,treatment_block)%>%
+  dplyr::summarize(prev=mean(collprevalence,na.rm=T))
+
+prevcoll$date <- as.numeric(sub("CollD", "", prevcoll$date))
+
+
+# Convert date column to character and remove "RhizD" string
+prevcoll$date <- as.character(prevcoll$date)
+prevcoll$date <- as.numeric(sub("CollD", "", prevcoll$date))
+prevcoll$age_gp<-as.factor(prevcoll$age_gp)
+prevcoll$temp<-as.factor(prevcoll$temp)
+
+prevcoll
+
+
+
+df_GRmetadata %>%
+  dplyr::filter(inoc %in% c("c", "rc")) %>% 
+  dplyr::group_by(inoc) %>%
+  dplyr::summarize(
+    N_infected = sum(CollD20 == 1, na.rm = TRUE),
+    N_total = sum(!is.na(CollD20)),
+    .groups = "drop"
+  )
+```
+
+
+
+
+#Colletotrichum lesion development D20 glmer + EMM ggplot
+```{r}
+df_GRmetadata <- df_GRmetadata %>%
+  mutate(id = seq_len(nrow(df_GRmetadata)))
+
+prevcoll3_counts <- df_GRmetadata %>%
+  filter(inoc %in% c("c","rc")) %>%
+  group_by(temp, age_gp, inoc, replicate, id, treatment_block) %>%
+  summarize(
+    infected = sum(CollD20, na.rm = TRUE),
+    total = sum(!is.na(CollD20)),
+    .groups = "drop"
+  )
+
+
+prevcoll3_counts$age_gp <- factor(prevcoll3_counts$age_gp, levels = c("y","o"))
+prevcoll3_counts$temp   <- factor(prevcoll3_counts$temp, levels = c("21","29"))
+prevcoll3_counts$inoc   <- factor(prevcoll3_counts$inoc, levels = c("c","rc"))
+
+
+
+glmm <- glmer(cbind(infected, total - infected) ~ temp * age_gp + temp*age_gp + temp + (1|replicate/treatment_block),
+              data = prevcoll3_counts,
+              family = binomial(link = "logit"))
+
+summary(glmm)
+Anova(glmm, type = 2)
+
+emm <- emmeans(glmm, ~temp * age_gp, type = "response")
+
+
+emm_df <- as.data.frame(emm) %>%
+  mutate(
+    pred_pct = prob,
+    CI_lower = asymp.LCL,
+    CI_upper = asymp.UCL
+  )
+emm_df
+
+
+emm_df <- emm_df %>%
+  mutate(
+    Temperature_f = factor(
+      temp,
+      levels = c("21", "29"),
+      labels = c("21°C", "29°C")
+    ),
+    Treatment_f = factor(
+      age_gp,
+      levels = c("y", "o"),
+      labels = c(
+        "Young",
+        "Old"
+      )
+    )
+  )
+
+
+collemmplot<-ggplot(
+  emm_df,
+  aes(
+    x = Temperature_f,
+    y = pred_pct,
+    group = Treatment_f,
+    shape = Treatment_f
+  )
+) +
+  geom_line(linewidth = 1) +
+  geom_point(size = 4) +
+  geom_errorbar(
+    aes(ymin = CI_lower, ymax = CI_upper),
+    width = 0.15,
+    linewidth = 0.8
+  ) +
+  labs(
+    title = expression(
+      italic("C. cereale")),
+    x = " ",
+    y = " ",
+    color = "Treatment",
+    shape = "Treatment"
+  ) +
+  scale_color_manual(
+    labels = c("Young", "Old")
+  ) +
+  scale_shape_manual(
+    values = c(16, 17),
+    labels = c("Young", "Old")
+  ) +
+  theme_classic(base_size = 14)+
+  coord_cartesian(ylim = c(0, 1))
+
+collemmplot
+
+
+
+
+### inoc << inoc * temp significant, overlap in CI 
+
+#glmm <- glmer(cbind(infected, total - infected) ~ temp * age_gp * inoc + (1|replicate/treatment_block),
+ #             data = prevcoll3_counts,
+#              family = binomial(link = "logit"))
+
+#summary(glmm)
+#Anova(glmm, type = 2)
+
+#emm2 <- emmeans(glmm, ~temp * inoc, type = "response")
+
+
+#emm_df2 <- as.data.frame(emm2) %>%
+#  mutate(
+#    pred_pct = prob,
+#    CI_lower = asymp.LCL,
+#    CI_upper = asymp.UCL
+#  )
+#emm_df2
+
+
+
+```
+
+#######################Rhizoctonia
+```{r}
+disease.long<-df_GRmetadata%>%
+pivot_longer(cols=c(RhizD5,RhizD7,RhizD10,RhizD12,RhizD15,RhizD20),
+              names_to="date",
+                values_to="rhizprevalence")
+
+disease.rhiz<-disease.long%>%
+  mutate(date=factor(date,levels=c("RhizD5","RhizD7","RhizD10","RhizD12","RhizD15","RhizD20")))
+
+prevrhiz<-disease.rhiz%>%
+  dplyr::group_by(replicate,date,inoc,age_gp,temp,treatment_block)%>%
+  dplyr::summarize(prev=mean(rhizprevalence,na.rm=T))
+
+# Convert date column to character and remove "RhizD" string
+prevrhiz$date <- as.character(prevrhiz$date)
+prevrhiz$date <- as.numeric(sub("RhizD", "", prevrhiz$date))
+prevrhiz$age_gp<-as.factor(prevrhiz$age_gp)
+prevrhiz$temp<-as.factor(prevrhiz$temp)
+
+prevrhiz
+
+
+#sample size
+
+
+df_GRmetadata %>%
+  dplyr::filter(inoc %in% c("r", "rc")) %>% 
+  dplyr::group_by(inoc) %>%
+  dplyr::summarize(
+    N_infected = sum(RhizD20 == 1, na.rm = TRUE),
+    N_total = sum(!is.na(RhizD20)),
+    .groups = "drop"
+  )
+```
+
+#Rhizoctonia lesion development D20 glmer + EMM df + ggplot
+```{r}
+df_GRmetadata <- df_GRmetadata %>%
+  mutate(id = seq_len(nrow(df_GRmetadata)))
+
+prevrhiz3_counts <- df_GRmetadata %>%
+  filter(inoc %in% c("r","rc")) %>%
+  group_by(temp, age_gp, inoc, replicate, id,treatment_block) %>%
+  summarize(
+    infected = sum(RhizD20, na.rm = TRUE),
+    total = sum(!is.na(RhizD20)),
+    .groups = "drop"
+  )
+
+glmm <- glmer(cbind(infected, total - infected) ~ temp * age_gp  + (1|replicate/treatment_block),
+              data = prevrhiz3_counts,
+              family = binomial(link = "logit"))
+
+summary(glmm)
+Anova(glmm, type = 2)
+
+emm <- emmeans(glmm, ~ temp * age_gp, type = "response")
+#emm
+
+
+emm_df <- as.data.frame(emm) %>%
+  mutate(
+    pred_pct = prob,
+    CI_lower = asymp.LCL,
+    CI_upper = asymp.UCL
+  )
+emm_df
+
+
+emm_df <- emm_df %>%
+  mutate(
+    Temperature_f = factor(
+      temp,
+      levels = c("21", "29"),
+      labels = c("21°C", "29°C")
+    ),
+    Treatment_f = factor(
+      age_gp,
+      levels = c("y", "o"),
+      labels = c(
+        "Young",
+        "Old"
+      )
+    )
+  )
+
+
+
+rhizemmplot<-ggplot(
+  emm_df,
+  aes(
+    x = Temperature_f,
+    y = pred_pct,
+    group = Treatment_f,
+    shape = Treatment_f
+  )
+) +
+  geom_line(linewidth = 1) +
+  geom_point(size = 4) +
+  geom_errorbar(
+    aes(ymin = CI_lower, ymax = CI_upper),
+    width = 0.15,
+    linewidth = 0.8
+  ) +
+  labs(
+    title = expression(
+      italic("R. solani")),
+    x = " ",
+    y = " ",
+    color = "Treatment",
+    shape = "Treatment"
+  ) +
+  scale_color_manual(
+    labels = c("Young", "Old")
+  ) +
+  scale_shape_manual(
+    values = c(16, 17),
+    labels = c("Young", "Old")
+  ) +
+  theme_classic(base_size = 14)+
+  coord_cartesian(ylim = c(0, 1))
+
+rhizemmplot
+
+```
+
+
+
+
+
+#putting Coll and Rhiz EMM plots together
+```{r}
+
+prevemmfig <- ggarrange(
+  collemmplot,
+  rhizemmplot,
+  nrow = 1, ncol = 2,
+  common.legend = TRUE,
+  legend = "right",
+  labels = c("A.", "B."),
+  font.label = list(size = 20, color = "black", face = "bold")
+)
+
+prevemmfig <- annotate_figure(
+  prevemmfig,
+  top = text_grob("",
+                  face = "bold", size = 18),
+  bottom = text_grob("Temperature Treatment", size = 14),
+  left = text_grob("Proportion Infected/Inoculated Plants", size = 14, rot = 90)
+
+)
+
+
+prevemmfig
+
+#ggsave("Figure2.png",plot=prevemmfig, width=6,height=4, dpi=600,bg = "white")
+
+```
+
+
+###############################################
+AUDPS
+###############################################
+#making audps values
+```{r}
+# Select relevant columns
+pla_data <- df_GRmetadata %>%
+  select(replicate,inoc, age_gp, temp, plaD5, plaD7, plaD10, plaD12, plaD15, plaD20,dry.biomass,treatment_block)
+
+#insert audps column 
+audps_data <- pla_data %>%
+  select(replicate, inoc, age_gp, temp, plaD5, plaD7, plaD10, plaD12, plaD15, plaD20,dry.biomass,treatment_block) %>%
+  mutate(
+    diff_plaD5 = abs(plaD5 - plaD5),
+    diff_plaD7 = abs(plaD7 - plaD5),
+    diff_plaD10 = abs(plaD10 - plaD5),
+    diff_plaD12 = abs(plaD12 - plaD5),
+    diff_plaD15 = abs(plaD15 - plaD5),
+    diff_plaD20 = abs(plaD20 - plaD5),
+    audps = diff_plaD5 + diff_plaD7 + diff_plaD10 + diff_plaD12 + diff_plaD15 + diff_plaD20,
+     log_audps =log(audps + 1),
+    log_dry_biomass = log(dry.biomass+1))
+
+audps_data2<-subset(audps_data,audps!="NA")
+audps_data2$replicate<-as.factor(audps_data2$replicate)
+audps_data2$temp<-as.factor(audps_data2$temp)
+audps_data2$age_gp<-as.factor(audps_data2$age_gp)
+
+audps_infected <- audps_data2 %>%
+  filter(audps > 0, inoc != "m")
+
+nrow(audps_infected)
+
+```
+##disease-divided AUDPS 
+```{r}
+#Colletotrichum single infections
+audps_coll <- audps_data %>%
+  filter(audps > 0, inoc %in% c("c"))
+
+head(audps_coll)
+
+collaudpsmod<- lme(
+  log_audps ~ temp * age_gp,
+  random = ~1|replicate/treatment_block, 
+  data= audps_coll,
+  #weights = varIdent(form= ~1|inoc),
+  method = "REML"
+)
+
+summary(collaudpsmod)
+anova(collaudpsmod)
+
+
+#Rhizoctonia single infections 
+audps_rhiz<-audps_data%>%
+  filter(audps>0,inoc %in% c("r"))
+
+rhizaudpsmod<- lme(
+  log_audps ~ temp * age_gp,
+  random = ~1|replicate/treatment_block, 
+  data= audps_rhiz,
+  #weights = varIdent(form= ~1|inoc),
+  method = "REML"
+)
+
+summary(rhizaudpsmod)
+anova(rhizaudpsmod)
+
+
+#Co-infections 
+audps_co<-audps_data%>%
+  filter(audps>0,inoc %in% c("rc"))
+
+coaudps<- lme(
+  log_audps ~ temp * age_gp,
+  random = ~1|replicate/treatment_block, 
+  data= audps_co,
+ # weights = varIdent(form= ~1|inoc),
+  method = "REML"
+)
+
+summary(coaudps)
+anova(coaudps)
+```
+#Estimated Marginal Means
+```{r}
+
+#Coll 
+#collemmtable<-emmeans(collaudpsmod,~temp|age_gp,type="response")
+#collemmtable
+
+#Rhiz
+rhizemmtable<-emmeans(rhizaudpsmod,~temp|age_gp,type="response")
+rhizemmtable
+
+#back-transform from log scale
+df<-as.data.frame(rhizemmtable)
+rhizemmtable_trans<-df%>%
+  mutate(
+    emmean2 = exp(emmean),
+    SE2 = exp(SE),
+    lower = exp(lower.CL),
+    upper = exp(upper.CL)
+  )
+rhizemmtable_trans
+
+
+#Co-infections
+coemmtable<-emmeans(coaudps,~temp|age_gp)
+#coemmtable
+
+#back-transform from log scale
+df<-as.data.frame(coemmtable)
+coemmtable_trans<-df%>%
+  mutate(
+    emmean2 = exp(emmean),
+    SE2 = exp(SE),
+    lower = exp(lower.CL),
+    upper = exp(upper.CL)
+  )
+coemmtable_trans
+```
+#disease-divided AUDPS figure
+```{r}
+
+
+### --- GLOBAL COLORS & LABELS --- ###
+
+infection_colors <- c(
+  "c"  = "red",
+  "r"  = "#009E73",
+  "rc" = "#56B4E9"
+)
+
+infection_labels <- c(
+  "c"  = expression(italic("C. cereale")),
+  "r"  = expression(italic("R. solani")),
+  "rc" = "Co-inoculation"
+)
+
+# Themes to remove axes
+remove_x <- theme(
+  axis.title.x = element_blank(),
+  axis.text.x  = element_blank(),
+  axis.ticks.x = element_blank()
+)
+
+remove_y <- theme(
+  axis.title.y = element_blank(),
+  axis.text.y  = element_blank(),
+  axis.ticks.y = element_blank()
+)
+
+
+
+temp_labels <- c(
+  "21" = expression(21 * degree * C),
+  "29" = expression(29 * degree * C)
+)
+
+age_labels <-c(
+  "o" = "Old",
+  "y" = "Young"
+)
+
+### --- FIGURE 1: C. cereale --- ###
+
+audps_coll$temp <- factor(audps_coll$temp, levels = c("21", "29"))
+
+coll_audps_fig <- ggplot(audps_coll, aes(x = temp, y = audps, color = inoc)) +
+  geom_boxplot() +
+  geom_jitter(position = position_jitterdodge(jitter.width = 0.3,
+                                              dodge.width = 0.75), alpha = 0.3) +
+  facet_grid(~age_gp, labeller = labeller(age_gp = age_labels)) +
+  labs(x = NULL, y = NULL, color = "Infection") +
+  ggtitle(expression(italic("C. cereale"))) +
+  theme_classic() +
+  ylim(0, 50) +
+  scale_x_discrete(labels = c("21", "29")) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        plot.title = element_text(hjust = 0.5)) +scale_color_manual(
+  values = infection_colors,
+  labels = infection_labels,
+  limits = c("c", "r", "rc"),
+  drop = FALSE
+)
+
+coll_audps_fig
+
+### --- FIGURE 2: R. solani --- ###
+### IMPORTANT: KEEP x-axis text here so "old" and "young" appear ###
+audps_rhiz$temp <- factor(audps_rhiz$temp, levels = c("21", "29"))
+
+
+rhiz_audps_fig <- ggplot(audps_rhiz, aes(x = temp, y = audps, color = inoc)) +
+  geom_boxplot() +
+  geom_jitter(position = position_jitterdodge(jitter.width = 0.3, 
+                                              dodge.width = 0.75), alpha = 0.3) +
+  facet_grid(~age_gp, labeller = labeller(age_gp = age_labels)) +
+  labs(x = NULL, y = NULL, color = "Infection") +
+  ggtitle(expression(italic("R. solani"))) +
+  theme_classic() +
+    scale_x_discrete(labels = c("21", "29")) +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    plot.title = element_text(hjust = 0.5)   # ← centers the title
+  ) +
+scale_color_manual(
+  values = infection_colors,
+  labels = infection_labels,
+  limits = c("c", "r", "rc"),
+  drop = FALSE
+)
+
+rhiz_audps_fig
+
+### --- FIGURE 3: Co-infection --- ###
+audps_co$temp <- factor(audps_co$temp, levels = c("21", "29"))
+
+co_audps_fig <- ggplot(audps_co, aes(x = temp, y = audps, color = inoc)) +
+  geom_boxplot() +
+  geom_jitter(position = position_jitterdodge(jitter.width = 0.3, 
+                                              dodge.width = 0.75), alpha = 0.3) +
+  facet_grid(~age_gp, labeller = labeller(age_gp = age_labels)) +
+  labs(x = NULL, y = NULL, color = "Infection") +
+  ggtitle("Co-infection") +
+  theme_classic() +
+   scale_x_discrete(labels = c("21", "29")) +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    plot.title = element_text(hjust = 0.5)   # ← centers the title
+  ) +
+scale_color_manual(
+  values = infection_colors,
+  labels = infection_labels,
+  limits = c("c", "r", "rc"),
+  drop = FALSE
+)
+
+co_audps_fig
+
+###### making the legend play nice
+legend_df <- data.frame(
+  temp = factor("21", levels = c("21","29")),
+  audps = 1,
+  inoc = factor(c("c","r","rc"), levels = c("c","r","rc"))
+)
+
+legend_plot <- ggplot(legend_df, aes(temp, audps, color = inoc)) +
+  geom_point() +
+  scale_color_manual(
+    values = infection_colors,
+    labels = infection_labels,
+    limits = c("c","r","rc"),
+    drop = FALSE
+  ) +
+  theme_void() +
+  labs(color = "Inoculation Treatment")
+
+
+
+### --- COMBINE THE PLOTS --- ###
+
+audpsfig <- ggarrange(
+  coll_audps_fig,
+  rhiz_audps_fig,
+  co_audps_fig,
+  nrow = 1, ncol = 3,
+  common.legend = TRUE,
+legend = "right",
+  legend.grob = get_legend(legend_plot),  labels = c("A.", "B.", "C."),
+  font.label = list(size = 20, color = "black", face = "bold")
+)
+
+
+### --- ADD SHARED X AND Y AXES --- ###
+
+audpsfig <- annotate_figure(
+  audpsfig,
+  top = text_grob("",
+                  face = "bold", size = 18),
+  bottom = text_grob("Temperature Treatment, °C", size = 16),
+  left = text_grob("Disease Severity (AUDPS)", rot = 90, size = 16)
+)
+
+audpsfig
+
+
+#ggsave("Figure3.png", audpsfig, width = 12, height = 5, dpi = 600, bg = "white")
+```
+
+
+
+###############################################
+Dry Biomass
+###############################################
+```{r}
+
+df_GRmetadata_dry.biomass <- df_GRmetadata %>%
+ filter(!is.na(dry.biomass))%>%
+  dplyr::ungroup()
+
+
+df_GRmetadata_dry.biomass$age_gp<-factor(df_GRmetadata_dry.biomass$age_gp,levels=c("o","y"))
+df_GRmetadata_dry.biomass$temp<-factor(df_GRmetadata_dry.biomass$temp,levels=c("29","21"))
+
+df_GRmetadata_dry.biomass$temp <- factor(df_GRmetadata_dry.biomass$temp, levels = c("21", "29"))
+df_GRmetadata_dry.biomass$age_gp <- factor(df_GRmetadata_dry.biomass$age_gp, levels = c("y", "o"))
+
+
+df_GRmetadata_dry.biomass$temp <- as.factor(df_GRmetadata_dry.biomass$temp)
+df_GRmetadata_dry.biomass$age_gp <- as.factor(df_GRmetadata_dry.biomass$age_gp)
+df_GRmetadata_dry.biomass$inoc <- as.factor(df_GRmetadata_dry.biomass$inoc)
+df_GRmetadata_dry.biomass$replicate<-as.factor(df_GRmetadata_dry.biomass$replicate)
+
+df_GRmetadata_dry.biomass$logbiomass<-log(df_GRmetadata_dry.biomass$dry.biomass+ 1)
+df_GRmetadata_dry.biomass <- df_GRmetadata_dry.biomass %>%
+ filter(!is.na(logbiomass))
+```
+#plot
+```{r}
+
+#age-specific boxplots 
+# Create separate plots for each age group
+
+# Split the data into two separate data frames for each age group
+df_GRmetadata_dry.biomass_o <- df_GRmetadata_dry.biomass %>% filter(age_gp == "o")
+df_GRmetadata_dry.biomass_y <- df_GRmetadata_dry.biomass %>% filter(age_gp == "y")
+
+
+# Plot for age_gp "o"
+biomassold<-ggplot(df_GRmetadata_dry.biomass_o, aes(x = temp, y = dry.biomass, color = inoc)) + 
+  geom_boxplot() +
+  geom_jitter(position = position_jitterdodge(jitter.width = 0.3, dodge.width = 0.75), alpha = 0.3) +
+  theme_classic() + 
+  labs(x = " ", y = " ", color = "Inoculum") + 
+  ggtitle("Old")+
+  scale_y_continuous(limits = c(0, 10))+
+     scale_x_discrete(labels = temp_labels) +
+   scale_color_manual(values = c("c" = "red", "r" = "#009E73", "rc" = "#56B4E9", "m" = "#F0E442"),
+labels = c(
+    "m"  = "Mock",
+    "r"  = expression(italic("R. solani")),
+    "c"  = expression(italic("C. cereale")),
+    "rc" = "Co-inoculated"
+  ),
+  limits = c("m","r","c","rc"),
+  drop = FALSE
+)
+  
+biomassold
+
+# 1-10 scaled plot for age_gp "y" -> direct comparison
+biomassyoung<-ggplot(df_GRmetadata_dry.biomass_y, aes(x = temp, y = dry.biomass, color = inoc)) + 
+  geom_boxplot() +
+  geom_jitter(position = position_jitterdodge(jitter.width = 0.3, dodge.width = 0.75), alpha = 0.3) +
+  theme_classic() + 
+  labs(x = " ", y = " ", color = "Inoculum") + 
+  ggtitle("Young")+ 
+  scale_y_continuous(limits = c(0, 10))+
+     scale_x_discrete(labels = temp_labels) +
+   scale_color_manual(values = c("c" = "red", "r" = "#009E73", "rc" = "#56B4E9", "m" = "#F0E442"),
+labels = c(
+    "m"  = "Mock",
+    "r"  = expression(italic("R. solani")),
+    "c"  = expression(italic("C. cereale")),
+    "rc" = "Co-inoculated"
+  ),
+  limits = c("m","r","c","rc"),
+  drop = FALSE
+)
+
+
+# Put figures together
+biomass <- ggarrange(biomassold, biomassyoung, 
+                      nrow = 1, ncol = 2, 
+                      common.legend = TRUE, legend = "right",
+                      labels = c("A.", "B."), 
+                      font.label = list(size = 22, color = "black", face = "bold"))
+
+biomass
+
+biomass <- annotate_figure(
+  biomass,
+  top = text_grob(" ",
+                  face = "bold", size = 18),
+  bottom = text_grob("Temperature Treatment", size = 14),
+  left = text_grob("Dry Biomass (g)", rot = 90, size = 14)
+)
+
+biomass
+
+#ggsave("Figure4.png", biomass, width = 10, height = 6, dpi = 600, bg = "white")
+
+```
+#model
+```{r}
+mbiomass3<- lme(
+  logbiomass ~ temp * age_gp * inoc,
+  random = ~1 | replicate/treatment_block, 
+  data = df_GRmetadata_dry.biomass,
+  method = "REML",
+)
+
+summary(mbiomass3)
+anova(mbiomass3)
+```
+#Estimated Marginal Means
+```{r}
+emm_all2 <- emmeans(mbiomass3, pairwise ~ temp|age_gp)
+# View means
+#summary(emm_all2)
+
+##back-transform from log-scale:
+emm_df <- summary(emm_all2$emmeans)
+
+emm_df_bt <- emm_df %>%
+  mutate(
+    emmean_bt = exp(emmean),
+    lower.CL_bt = exp(lower.CL),
+    upper.CL_bt = exp(upper.CL)
+  )
+
+emm_df_bt
+```
+
